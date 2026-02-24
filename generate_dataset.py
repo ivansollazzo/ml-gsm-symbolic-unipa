@@ -282,18 +282,34 @@ def load_templates(template_dirs: Sequence[Path]) -> List[Tuple[Path, Dict[str, 
     return records
 
 
-def generate_samples(records: List[Tuple[Path, Dict[str, Any]]], instances: int, backtracking_ratio: float, verbose: bool = False) -> List[Dict[str, str]]:
+def _clean_question(text: str) -> str:
+    return text.strip()
+
+
+def _clean_answer(text: str) -> str:
+    # Ensure consistent Apple-like style with final answer after ####
+    t = text.strip()
+    if "####" in t:
+        reasoning, final = t.rsplit("####", 1)
+        return f"{reasoning.strip()}\n\n#### {final.strip()}"
+    return t
+
+
+def generate_samples(records: List[Tuple[Path, Dict[str, Any]]], instances: int, backtracking_ratio: float, verbose: bool = False) -> List[Dict[str, Any]]:
     if not 0 <= backtracking_ratio <= 1:
         raise ValueError("backtracking_ratio must be in [0,1]")
 
     start = time.time()
-    samples: List[Dict[str, str]] = []
+    samples: List[Dict[str, Any]] = []
     total_templates = len(records)
+    global_id = 0
 
     for idx, (fp, obj) in enumerate(records, 1):
         q_ann = obj.get("question_annotated") or obj.get("question")
         a_ann = obj.get("answer_annotated") or obj.get("answer")
         a_back = obj.get("answer_annotated_backtrack") or obj.get("answer_backtrack") or a_ann
+        q_orig = (obj.get("question") or "").strip()
+        a_orig = (obj.get("answer") or "").strip()
         if not isinstance(q_ann, str) or not isinstance(a_ann, str):
             continue
 
@@ -302,29 +318,43 @@ def generate_samples(records: List[Tuple[Path, Dict[str, Any]]], instances: int,
         modes = [False] * normal_count + [True] * back_count
         random.shuffle(modes)
 
-        for j, use_backtrack in enumerate(modes, 1):
+        for j, use_backtrack in enumerate(modes):
             try:
                 env, _ = execute_init_and_conditions(q_ann)
-                user_q = render_annotated_text(q_ann, env)
+                question = _clean_question(render_annotated_text(q_ann, env))
                 answer_tpl = a_back if use_backtrack else a_ann
-                assistant = format_assistant(render_annotated_text(answer_tpl, env))
+                answer = _clean_answer(render_annotated_text(answer_tpl, env))
                 status = "ok"
             except Exception:
-                user_q = (obj.get("question") or q_ann).strip()
+                question = _clean_question(q_orig or q_ann)
                 answer_src = obj.get("answer_backtrack") if use_backtrack else obj.get("answer")
-                assistant = format_assistant((answer_src or a_ann).strip())
+                answer = _clean_answer((answer_src or a_ann).strip())
                 status = "fallback"
-            samples.append({"system": SYSTEM_PROMPT, "user": user_q, "assistant": assistant})
+
+            sample_row = {
+                "id": global_id,
+                "instance": j,
+                "question": question,
+                "answer": answer,
+                "original_id": obj.get("id_orig"),
+                "original_question": q_orig,
+                "original_answer": a_orig,
+                # SFT-oriented fields requested previously
+                "system": SYSTEM_PROMPT,
+                "user": question,
+                "assistant": format_assistant(answer),
+            }
+            samples.append(sample_row)
+            global_id += 1
 
             if verbose:
-                mode = "backtrack" if use_backtrack else "normal"
-                print(f"[{idx}/{total_templates}] {fp.name} instance {j}/{instances} mode={mode} status={status}")
+                mode = "backtracking" if use_backtrack else "normal"
+                print(f"[{idx}/{total_templates}] {fp.name} instance={j} mode={mode} status={status} total={global_id}")
 
         if verbose and idx % 25 == 0:
             elapsed = time.time() - start
-            print(f"-- progress: {idx}/{total_templates} templates, {len(samples)} samples, elapsed={elapsed:.1f}s")
+            print(f"-- progress: templates={idx}/{total_templates}, samples={len(samples)}, elapsed={elapsed:.1f}s")
 
-    random.shuffle(samples)
     if verbose:
         print(f"Done: generated {len(samples)} samples in {time.time()-start:.1f}s")
     return samples
