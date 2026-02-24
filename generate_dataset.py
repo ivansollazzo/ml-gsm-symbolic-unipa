@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import json
 import random
 import re
-import time
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,10 +27,27 @@ SYSTEM_PROMPT = """You are an expert logical solver governed by a strict reasoni
     - ALWAYS explain the available resources, positions, or variables in the new state (inventory audit).
 7. **GOAL CHECK:** after each valid move, check if the goal state is reached."""
 
-# --- symbol registry (values), used to build a per-json env dynamically ---
-
+# Globals used in template code
 names_female = ["Emily", "Sophie", "Mary", "Julia", "Sarah", "Olivia", "Emma"]
 names_male = ["Liam", "Noah", "James", "Ethan", "Mason", "Logan", "Lucas"]
+names = names_female + names_male
+weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+colors = ["red", "blue", "green", "yellow", "orange", "purple", "black", "white"]
+fruits = ["apple", "banana", "orange", "pear", "grape", "mango", "peach"]
+sports = ["soccer", "basketball", "tennis", "baseball", "swimming", "running"]
+cities = ["New York", "London", "Paris", "Tokyo", "Sydney", "Toronto"]
+currencies_sym = ["$", "€", "£", "¥"]
+multi_times = [2, 3, 4, 5, 6]
+multiple_ice = [2, 3, 4]
+multiple = ["double", "triple", "quadruple"]
+fractions = [Fraction(1, 2), Fraction(1, 3), Fraction(2, 3), Fraction(1, 4), Fraction(3, 4)]
+fraction_nums = [Fraction(1, 2), Fraction(1, 3), Fraction(2, 3), Fraction(1, 4), Fraction(3, 4), Fraction(1, 5)]
+fraction_decimals = [0.25, 0.5, 0.75, 0.2, 0.4, 0.6]
+fraction_alnum = [Fraction(1, 2), Fraction(1, 3), Fraction(2, 3), Fraction(1, 4), Fraction(3, 4)]
+fraction_alph = ["half", "one-third", "two-thirds", "one-fourth", "three-fourths"]
+weights_sm = [1, 2, 3, 4, 5]
+weights_med = [10, 15, 20, 25, 30]
+length_lg = [50, 75, 100, 125, 150, 200]
 
 
 def sample(items: Sequence[Any], k: int = 1) -> Any:
@@ -116,10 +131,30 @@ SAFE_BUILTINS = {
     "sorted": sorted,
 }
 
-SYMBOLS: Dict[str, Any] = {
-    # runtime modules/helpers
+GLOBAL_ENV: Dict[str, Any] = {
+    "__builtins__": SAFE_BUILTINS,
     "np": np,
     "Fraction": Fraction,
+    "names": names,
+    "names_female": names_female,
+    "names_male": names_male,
+    "weekdays": weekdays,
+    "colors": colors,
+    "fruits": fruits,
+    "sports": sports,
+    "cities": cities,
+    "currencies_sym": currencies_sym,
+    "multi_times": multi_times,
+    "multiple_ice": multiple_ice,
+    "multiple": multiple,
+    "fractions": fractions,
+    "fraction_nums": fraction_nums,
+    "fraction_decimals": fraction_decimals,
+    "fraction_alnum": fraction_alnum,
+    "fraction_alph": fraction_alph,
+    "weights_sm": weights_sm,
+    "weights_med": weights_med,
+    "length_lg": length_lg,
     "sample": sample,
     "sample_sequential": sample_sequential,
     "shuffle_list": shuffle_list,
@@ -129,33 +164,6 @@ SYMBOLS: Dict[str, Any] = {
     "divides": divides,
     "fix_floats": fix_floats,
     "range": range,
-    # data constants
-    "names_female": names_female,
-    "names_male": names_male,
-    "names": names_female + names_male,
-    "weekdays": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
-    "colors": ["red", "blue", "green", "yellow", "orange", "purple", "black", "white"],
-    "fruits": ["apple", "banana", "orange", "pear", "grape", "mango", "peach"],
-    "sports": ["soccer", "basketball", "tennis", "baseball", "swimming", "running"],
-    "cities": ["New York", "London", "Paris", "Tokyo", "Sydney", "Toronto"],
-    "currencies_sym": ["$", "€", "£", "¥"],
-    "multi_times": [2, 3, 4, 5, 6],
-    "multiple_ice": [2, 3, 4],
-    "multiple": ["double", "triple", "quadruple"],
-    "fractions": [Fraction(1, 2), Fraction(1, 3), Fraction(2, 3), Fraction(1, 4), Fraction(3, 4)],
-    "fraction_nums": [Fraction(1, 2), Fraction(1, 3), Fraction(2, 3), Fraction(1, 4), Fraction(3, 4), Fraction(1, 5)],
-    "fraction_decimals": [0.25, 0.5, 0.75, 0.2, 0.4, 0.6],
-    "fraction_alnum": [Fraction(1, 2), Fraction(1, 3), Fraction(2, 3), Fraction(1, 4), Fraction(3, 4)],
-    "fraction_alph": ["half", "one-third", "two-thirds", "one-fourth", "three-fourths"],
-    "weights_sm": [1, 2, 3, 4, 5],
-    "weights_med": [10, 15, 20, 25, 30],
-    "length_lg": [50, 75, 100, 125, 150, 200],
-}
-
-
-ALLOWED_BUILTIN_NAMES = {
-    "True", "False", "None", "and", "or", "not", "in", "is",
-    "abs", "min", "max", "sum", "len", "int", "float", "round", "list", "tuple", "set", "sorted",
 }
 
 
@@ -175,53 +183,11 @@ def _resolve_sample_space(value: Any) -> Any:
     return value
 
 
-def _collect_required_symbols(text: str) -> set[str]:
-    """Analyze ONLY this json text and return external symbol names it needs."""
-    lines = _extract_block(text, "init") + _extract_block(text, "conditions")
-    answer_match = re.search(r"#answer:\s*(.+)", text)
-    if answer_match:
-        lines.append(answer_match.group(1).strip())
-
-    required: set[str] = set()
-    assigned: set[str] = set()
-
-    for raw in lines:
-        stmt = raw.replace("$", "")
-        try:
-            tree = ast.parse(stmt)
-        except SyntaxError:
-            continue
-
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-                assigned.add(node.id)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
-                if node.id not in assigned and node.id not in ALLOWED_BUILTIN_NAMES:
-                    required.add(node.id)
-    return required
-
-
-def build_env_for_template(text: str) -> Dict[str, Any]:
-    required = _collect_required_symbols(text)
-    env: Dict[str, Any] = {"__builtins__": SAFE_BUILTINS}
-    for name in sorted(required):
-        if name in SYMBOLS:
-            env[name] = SYMBOLS[name]
-    # Always available helpers in case AST misses dynamic access
-    env.setdefault("range", range)
-    env.setdefault("sample", sample)
-    env.setdefault("Fraction", Fraction)
-    env.setdefault("np", np)
-    return env
-
-
-def execute_init_and_conditions(text: str, max_attempts: int = 4000) -> Tuple[Dict[str, Any], Any]:
+def execute_init_and_conditions(text: str, max_attempts: int = 2000) -> Tuple[Dict[str, Any], Any]:
     init_lines = _extract_block(text, "init")
     condition_lines = _extract_block(text, "conditions")
     answer_match = re.search(r"#answer:\s*(.+)", text)
     answer_expr = answer_match.group(1).strip() if answer_match else None
-    template_env = build_env_for_template(text)
 
     for _ in range(max_attempts):
         local_env: Dict[str, Any] = {}
@@ -229,14 +195,14 @@ def execute_init_and_conditions(text: str, max_attempts: int = 4000) -> Tuple[Di
             for line in init_lines:
                 if line.startswith("$"):
                     lhs, rhs = line[1:].split("=", 1)
-                    local_env[lhs.strip()] = _resolve_sample_space(eval(rhs.strip(), template_env, local_env))
+                    local_env[lhs.strip()] = _resolve_sample_space(eval(rhs.strip(), GLOBAL_ENV, local_env))
                 else:
-                    exec(line, template_env, local_env)
+                    exec(line, GLOBAL_ENV, local_env)
 
-            if not all(bool(eval(c, template_env, local_env)) for c in condition_lines):
+            if not all(bool(eval(c, GLOBAL_ENV, local_env)) for c in condition_lines):
                 continue
 
-            answer_value = eval(answer_expr, template_env, local_env) if answer_expr else None
+            answer_value = eval(answer_expr, GLOBAL_ENV, local_env) if answer_expr else None
             return local_env, answer_value
         except Exception:
             continue
@@ -245,7 +211,7 @@ def execute_init_and_conditions(text: str, max_attempts: int = 4000) -> Tuple[Di
 
 def _stringify(value: Any) -> str:
     if isinstance(value, Fraction):
-        return str(value)
+        return str(float(value)).rstrip("0").rstrip(".") if value.denominator not in (1, 2, 4, 5, 10) else str(value)
     return str(value)
 
 
@@ -282,15 +248,12 @@ def load_templates(template_dirs: Sequence[Path]) -> List[Tuple[Path, Dict[str, 
     return records
 
 
-def generate_samples(records: List[Tuple[Path, Dict[str, Any]]], instances: int, backtracking_ratio: float, verbose: bool = False) -> List[Dict[str, str]]:
+def generate_samples(records: List[Tuple[Path, Dict[str, Any]]], instances: int, backtracking_ratio: float) -> List[Dict[str, str]]:
     if not 0 <= backtracking_ratio <= 1:
         raise ValueError("backtracking_ratio must be in [0,1]")
 
-    start = time.time()
     samples: List[Dict[str, str]] = []
-    total_templates = len(records)
-
-    for idx, (fp, obj) in enumerate(records, 1):
+    for _fp, obj in records:
         q_ann = obj.get("question_annotated") or obj.get("question")
         a_ann = obj.get("answer_annotated") or obj.get("answer")
         a_back = obj.get("answer_annotated_backtrack") or obj.get("answer_backtrack") or a_ann
@@ -302,31 +265,20 @@ def generate_samples(records: List[Tuple[Path, Dict[str, Any]]], instances: int,
         modes = [False] * normal_count + [True] * back_count
         random.shuffle(modes)
 
-        for j, use_backtrack in enumerate(modes, 1):
+        for use_backtrack in modes:
             try:
                 env, _ = execute_init_and_conditions(q_ann)
                 user_q = render_annotated_text(q_ann, env)
                 answer_tpl = a_back if use_backtrack else a_ann
                 assistant = format_assistant(render_annotated_text(answer_tpl, env))
-                status = "ok"
             except Exception:
+                # Fallback to static text if stochastic constraints are too strict.
                 user_q = (obj.get("question") or q_ann).strip()
                 answer_src = obj.get("answer_backtrack") if use_backtrack else obj.get("answer")
                 assistant = format_assistant((answer_src or a_ann).strip())
-                status = "fallback"
             samples.append({"system": SYSTEM_PROMPT, "user": user_q, "assistant": assistant})
 
-            if verbose:
-                mode = "backtrack" if use_backtrack else "normal"
-                print(f"[{idx}/{total_templates}] {fp.name} instance {j}/{instances} mode={mode} status={status}")
-
-        if verbose and idx % 25 == 0:
-            elapsed = time.time() - start
-            print(f"-- progress: {idx}/{total_templates} templates, {len(samples)} samples, elapsed={elapsed:.1f}s")
-
     random.shuffle(samples)
-    if verbose:
-        print(f"Done: generated {len(samples)} samples in {time.time()-start:.1f}s")
     return samples
 
 
@@ -345,7 +297,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--backtracking-ratio", type=float, default=0.3, help="Fraction of backtracking samples")
     parser.add_argument("--output", type=Path, default=Path("generated_data/sft_combined.jsonl"))
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--verbose", action="store_true", help="Print progress while generating")
     return parser.parse_args()
 
 
@@ -355,15 +306,7 @@ def main() -> None:
 
     template_dirs = [args.templates_root / s for s in args.subdirs]
     records = load_templates(template_dirs)
-    if args.verbose:
-        print(f"Loaded {len(records)} templates from {[str(d) for d in template_dirs]}")
-
-    samples = generate_samples(
-        records,
-        instances=args.instances,
-        backtracking_ratio=args.backtracking_ratio,
-        verbose=args.verbose,
-    )
+    samples = generate_samples(records, instances=args.instances, backtracking_ratio=args.backtracking_ratio)
     write_jsonl(samples, args.output)
     print(f"Wrote {len(samples)} samples to {args.output}")
 
